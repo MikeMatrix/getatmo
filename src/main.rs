@@ -1,7 +1,11 @@
 use regex::Regex;
 use reqwest::{self, Client};
 use serde_json::Value;
-use std::{collections::HashMap, env};
+use std::{
+    collections::BTreeMap,
+    env,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 async fn request_token(client: &Client) -> Option<String> {
     let Ok(response) = client.get("https://weathermap.netatmo.com").send().await else {
@@ -19,8 +23,20 @@ async fn request_token(client: &Client) -> Option<String> {
     Some(catpure["token"].to_string())
 }
 
-async fn request_data(client: &Client, token: String, device_id: String) -> HashMap<String, f64> {
-    let mut result_map = HashMap::new();
+async fn request_data(client: &Client, token: String, device_id: String) -> BTreeMap<String, f64> {
+    let mut result_map = BTreeMap::new();
+
+    let query_timestamp_key = String::from("query_timestamp");
+    let timestamp_key = String::from("timestamp");
+
+    let query_timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Error: Time went poof!")
+        .as_secs_f64();
+
+    result_map.insert(query_timestamp_key.clone(), query_timestamp);
+    result_map.insert(timestamp_key.clone(), 0.0);
+
     let Ok(repsonse) = client
         .post("https://app.netatmo.net/api/getpublicmeasure")
         .header("Authorization", format!("Bearer {}", token))
@@ -51,7 +67,11 @@ async fn request_data(client: &Client, token: String, device_id: String) -> Hash
         let res = measure["res"].as_object().unwrap_or(&empty_map);
         let data_types = measure["type"].as_array().unwrap_or(&empty_vec);
 
-        for (_, data) in res.iter() {
+        for (timestamp, data) in res.iter() {
+            let ts = timestamp.parse::<f64>().unwrap_or(0.0);
+            if *result_map.get(&timestamp_key).unwrap_or(&0.0) < ts {
+                result_map.insert(timestamp_key.clone(), ts);
+            }
             let data = data.as_array().unwrap_or(&empty_vec);
 
             for (i, v) in data.iter().enumerate() {
@@ -78,12 +98,14 @@ async fn main() {
         return;
     };
 
+    let default_output = String::from("{}");
+
     let client = reqwest::Client::new();
     let Some(token) = request_token(&client).await else {
-        println!("Error: No token found");
+        println!("{}", default_output);
         return;
     };
     let result_map = request_data(&client, token, device_id).await;
-    let output = serde_json::to_string(&result_map).unwrap_or("{}".to_string());
+    let output = serde_json::to_string(&result_map).unwrap_or(default_output);
     println!("{}", output);
 }
