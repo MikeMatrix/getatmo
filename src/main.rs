@@ -1,7 +1,3 @@
-extern crate regex;
-extern crate serde;
-extern crate serde_json;
-
 use regex::Regex;
 use reqwest::{self, Client};
 use serde_json::Value;
@@ -23,11 +19,8 @@ async fn request_token(client: &Client) -> Option<String> {
     Some(catpure["token"].to_string())
 }
 
-async fn request_data(
-    client: &Client,
-    token: String,
-    device_id: String,
-) -> Result<HashMap<String, f64>, String> {
+async fn request_data(client: &Client, token: String, device_id: String) -> HashMap<String, f64> {
+    let mut result_map = HashMap::new();
     let Ok(repsonse) = client
         .post("https://app.netatmo.net/api/getpublicmeasure")
         .header("Authorization", format!("Bearer {}", token))
@@ -36,39 +29,39 @@ async fn request_data(
         }))
         .send()
         .await else {
-            return Err(String::from("Request Failed"));
+            return result_map;
         };
 
     let Ok(data) = repsonse.text().await else {
-        return Err(String::from("Body fetching failed"));
+        return result_map;
     };
 
     let Ok(value) = serde_json::from_str::<Value>(data.as_str()) else {
-        return Err(String::from("Deserialize failed"));
+        return result_map;
     };
 
     let Some(measures) = &value["body"][0]["measures"].as_object() else {
-        return Err(String::from("Measures failed"));
+        return result_map;
     };
 
-    let mut result_map = HashMap::new();
+    let empty_map = serde_json::map::Map::new();
+    let empty_vec = Vec::new();
 
-    // What even is this hairball...
-    for key in measures.keys() {
-        let res = &measures[key]["res"].as_object().expect("");
-        let data_types = &measures[key]["type"].as_array().expect("data types");
-        for res_key in res.keys() {
-            let data = res[res_key].as_array().expect("res array");
+    for (_, measure) in measures.iter() {
+        let res = measure["res"].as_object().unwrap_or(&empty_map);
+        let data_types = measure["type"].as_array().unwrap_or(&empty_vec);
+
+        for (_, data) in res.iter() {
+            let data = data.as_array().unwrap_or(&empty_vec);
+
             for (i, v) in data.iter().enumerate() {
-                result_map.insert(
-                    data_types[i].as_str().expect("String").to_string(),
-                    v.as_f64().expect("f64"),
-                );
+                let data_type = data_types.get(i).and_then(Value::as_str).unwrap_or("");
+                let value = v.as_f64().unwrap_or(0.0);
+                result_map.insert(data_type.to_string(), value);
             }
         }
     }
-
-    return Ok(result_map);
+    return result_map;
 }
 
 #[tokio::main]
@@ -90,9 +83,7 @@ async fn main() {
         println!("Error: No token found");
         return;
     };
-
-    match request_data(&client, token, device_id).await {
-        Ok(output) => println!("{}", serde_json::to_string_pretty(&output).expect("Fuck")),
-        Err(output) => println!("Error: {}", output),
-    }
+    let result_map = request_data(&client, token, device_id).await;
+    let output = serde_json::to_string(&result_map).unwrap_or("{}".to_string());
+    println!("{}", output);
 }
